@@ -508,6 +508,22 @@ async def score_new_data(invoices: UploadFile = File(...)) -> dict:
     }
 
 
+# ── Feedback ─────────────────────────────────────────────────────────
+
+@app.get("/api/feedback")
+def feedback_panel() -> dict:
+    """Feedback insights: review counts, confirm/reject rates, stage-B state."""
+    from .feedback_model import feedback_summary
+    return feedback_summary(config.DB_PATH)
+
+
+@app.post("/api/feedback/rerank")
+def feedback_rerank() -> dict:
+    """Recompute feedback-adjusted ranking now (also runs at pipeline end)."""
+    from .feedback_model import refresh_ranking_in_db
+    return refresh_ranking_in_db(config.DB_PATH)
+
+
 # ── Model info ────────────────────────────────────────────────────────
 
 @app.get("/api/models")

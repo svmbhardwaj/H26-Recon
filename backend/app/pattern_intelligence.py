@@ -23,8 +23,31 @@ def _safe_float(v, default=0.0):
 
 
 def _confidence(n: int, strength: float) -> float:
-    # Bounded, interpretable score: recurrence + concentration strength.
+    """Pattern confidence formula: 45 + 4×min(n,10) + 25×concentration, capped 99.
+
+    Recurrence count dominates; concentration (share of the vendor's or the
+    period's cases affected) adds up to 25 points.
+    """
     return round(min(99.0, 45.0 + min(n, 10) * 4.0 + min(max(strength, 0.0), 1.0) * 25.0), 2)
+
+
+def _trend(grp: pd.DataFrame) -> str:
+    """Is the vendor's error rate rising? Compare first half vs second half of
+    the group's case dates. RISING / STABLE / FALLING / UNKNOWN."""
+    dates = pd.to_datetime(grp.get("invoice_date"), errors="coerce").dropna().sort_values()
+    if len(dates) < 4:
+        return "UNKNOWN"
+    mid = len(dates) // 2
+    first, second = dates.iloc[:mid], dates.iloc[mid:]
+    span_first = max(1, (first.max() - first.min()).days)
+    span_second = max(1, (second.max() - second.min()).days)
+    rate_first = len(first) / span_first
+    rate_second = len(second) / span_second
+    if rate_second > rate_first * 1.5:
+        return "RISING"
+    if rate_first > rate_second * 1.5:
+        return "FALLING"
+    return "STABLE"
 
 
 def build_relationship_graph(cases: pd.DataFrame) -> nx.Graph:
@@ -84,6 +107,9 @@ def detect_patterns(cases: pd.DataFrame, invoices: pd.DataFrame | None = None) -
             "concentration": round(concentration, 4),
             "pattern_confidence": _confidence(n, concentration),
             "financial_exposure": round(float(grp.get("financial_exposure", pd.Series(dtype=float)).apply(_safe_float).sum()), 2),
+            "trend": _trend(grp),
+            "first_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").min().date().isoformat() if grp["invoice_date"].notna().any() else None,
+            "last_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").max().date().isoformat() if grp["invoice_date"].notna().any() else None,
             "explanation": f"{n} cases of the same discrepancy type are associated with vendor {vendor}.",
         })
         for _, r in grp.iterrows():
@@ -104,6 +130,9 @@ def detect_patterns(cases: pd.DataFrame, invoices: pd.DataFrame | None = None) -
             "occurrence_count": n, "affected_vendors": vendors, "affected_invoices": grp["invoice_id"].nunique(),
             "concentration": round(concentration, 4), "pattern_confidence": _confidence(n, concentration),
             "financial_exposure": round(float(grp.get("financial_exposure", pd.Series(dtype=float)).apply(_safe_float).sum()), 2),
+            "trend": _trend(grp),
+            "first_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").min().date().isoformat() if grp["invoice_date"].notna().any() else None,
+            "last_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").max().date().isoformat() if grp["invoice_date"].notna().any() else None,
             "explanation": f"{n} cases across {vendors} vendors share the same discrepancy type during {period}.",
         })
         for _, r in grp.iterrows():
@@ -124,6 +153,9 @@ def detect_patterns(cases: pd.DataFrame, invoices: pd.DataFrame | None = None) -
                 "occurrence_count": n, "affected_vendors": 1, "affected_invoices": grp["invoice_id"].nunique(),
                 "concentration": round(concentration, 4), "pattern_confidence": _confidence(n, concentration),
                 "financial_exposure": round(float(grp.get("financial_exposure", pd.Series(dtype=float)).apply(_safe_float).sum()), 2),
+                "trend": _trend(grp),
+                "first_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").min().date().isoformat() if grp["invoice_date"].notna().any() else None,
+                "last_seen": pd.to_datetime(grp["invoice_date"], errors="coerce").max().date().isoformat() if grp["invoice_date"].notna().any() else None,
                 "explanation": f"{n} ML-anomalous transactions are associated with vendor {vendor}.",
             })
             for _, r in grp.iterrows():
@@ -133,6 +165,14 @@ def detect_patterns(cases: pd.DataFrame, invoices: pd.DataFrame | None = None) -
     memberships_df = pd.DataFrame(memberships)
     if not patterns_df.empty:
         patterns_df = patterns_df.sort_values(["pattern_confidence", "financial_exposure"], ascending=False).reset_index(drop=True)
+        # Two-way linkage: patterns carry their member case ids; membership rows
+        # already carry the pattern id.
+        member_map = memberships_df.groupby("pattern_id")["case_id"].apply(lambda s: ",".join(sorted(set(map(str, s))))) if not memberships_df.empty else {}
+        patterns_df["member_case_ids"] = patterns_df["pattern_id"].map(member_map).fillna("")
+    else:
+        patterns_df = pd.DataFrame(columns=PATTERN_COLUMNS)
+    if memberships_df.empty:
+        memberships_df = pd.DataFrame(columns=MEMBERSHIP_COLUMNS)
     return patterns_df, memberships_df
 
 
@@ -168,7 +208,8 @@ def enrich_cases_with_patterns(cases: pd.DataFrame, patterns: pd.DataFrame, memb
 PATTERN_COLUMNS = [
     "pattern_id", "pattern_type", "pattern_label", "vendor_code", "issue_type", "period",
     "occurrence_count", "affected_vendors", "affected_invoices", "concentration",
-    "pattern_confidence", "financial_exposure", "explanation",
+    "pattern_confidence", "financial_exposure", "trend", "first_seen", "last_seen",
+    "member_case_ids", "explanation",
 ]
 MEMBERSHIP_COLUMNS = ["pattern_id", "case_id", "membership_reason"]
 

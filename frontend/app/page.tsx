@@ -2,15 +2,21 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { api, formatMoney, humanIssue } from '../lib/api';
+import { api, formatMoney, humanIssue, type DashboardData, type FeedbackPanel, type MetricsResponse, type PipelineStatus } from '../lib/api';
 
 export default function Dashboard() {
-  const [d, setD] = useState<any>(null);
+  const [d, setD] = useState<DashboardData | null>(null);
+  const [fb, setFb] = useState<FeedbackPanel | null>(null);
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [err, setErr] = useState('');
   const [running, setRunning] = useState(false);
-  const [pipeResult, setPipeResult] = useState<any>(null);
+  const [pipeStatus, setPipeStatus] = useState<PipelineStatus | null>(null);
 
-  const load = () => api.dashboard().then(setD).catch((e) => setErr(e.message));
+  const load = () => {
+    api.dashboard().then(setD).catch((e) => setErr(e.message));
+    api.feedback().then(setFb).catch(() => setFb(null));
+    api.metrics().then(setMetrics).catch(() => setMetrics(null));
+  };
 
   useEffect(() => {
     load();
@@ -18,13 +24,27 @@ export default function Dashboard() {
 
   const runPipeline = async () => {
     setRunning(true);
-    setPipeResult(null);
+    setPipeStatus(null);
     try {
-      const r = await api.runPipeline();
-      setPipeResult(r);
-      await load();
-    } catch (e: any) {
-      setPipeResult({ ok: false, error: e.message });
+      await api.runPipeline();
+      const poll = (): Promise<PipelineStatus> =>
+        new Promise((resolve) => {
+          const tick = () => {
+            api.pipelineStatus().then((s) => {
+              setPipeStatus(s);
+              if (s.state === 'running') setTimeout(tick, 1500);
+              else resolve(s);
+            }).catch(() => setTimeout(tick, 3000));
+          };
+          tick();
+        });
+      await poll();
+      load();
+    } catch (e) {
+      setPipeStatus({
+        state: 'failed', stages: [], populated: false, total_cases: 0,
+        error: e instanceof Error ? e.message : 'Pipeline failed',
+      });
     } finally {
       setRunning(false);
     }
@@ -80,41 +100,39 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Pipeline result */}
-      {pipeResult && (
+      {/* Pipeline result (live status while/after running) */}
+      {(running || pipeStatus) && (
         <div
           className="card fade-in"
           style={{
             marginBottom: 16,
-            borderColor: pipeResult.ok ? 'var(--success-border)' : 'var(--danger-border)',
+            borderColor: pipeStatus?.state === 'failed' ? 'var(--danger-border)' : 'var(--success-border)',
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <b style={{ color: pipeResult.ok ? 'var(--success)' : 'var(--danger)', fontSize: 13 }}>
-                Pipeline {pipeResult.ok ? 'completed' : 'failed'}
+              <b style={{ color: pipeStatus?.state === 'failed' ? 'var(--danger)' : 'var(--success)', fontSize: 13 }}>
+                Pipeline {pipeStatus?.state === 'running' ? 'running' : pipeStatus?.state === 'failed' ? 'failed' : 'completed'}
               </b>
-              <span className="small" style={{ marginLeft: 10 }}>
-                {pipeResult.total_elapsed_s}s
-              </span>
+              {pipeStatus?.current_stage && running && (
+                <span className="small" style={{ marginLeft: 10 }}>stage: {humanIssue(pipeStatus.current_stage)}</span>
+              )}
             </div>
-            <button className="btn" onClick={() => setPipeResult(null)} style={{ padding: '3px 8px', fontSize: 11 }}>✕</button>
+            {!running && (
+              <button className="btn" onClick={() => setPipeStatus(null)} style={{ padding: '3px 8px', fontSize: 11 }}>✕</button>
+            )}
           </div>
-          {pipeResult.stages && (
-            <div style={{ marginTop: 10 }}>
-              {pipeResult.stages.map((s: any, i: number) => (
-                <div className="pipeline-stage" key={i}>
-                  <div className="stage-icon stage-done">✓</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>{s.name.replace(/_/g, ' ')}</div>
-                    <div className="small">{s.detail}</div>
-                  </div>
-                  <span className="tag">{s.elapsed_s}s</span>
-                </div>
-              ))}
+          {(pipeStatus?.stages || []).map((s, i) => (
+            <div className="pipeline-stage" key={i}>
+              <div className={`stage-icon ${s.error ? '' : 'stage-done'}`}>{s.error ? '✕' : '✓'}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 12 }}>{humanIssue(s.name)}</div>
+                <div className="small">{s.detail || s.error}</div>
+              </div>
+              <span className="tag">{s.elapsed_s}s</span>
             </div>
-          )}
-          {pipeResult.error && <p style={{ color: 'var(--danger)', marginTop: 8, fontSize: 12 }}>{pipeResult.error}</p>}
+          ))}
+          {pipeStatus?.error && <p style={{ color: 'var(--danger)', marginTop: 8, fontSize: 12 }}>{pipeStatus.error}</p>}
         </div>
       )}
 
@@ -243,6 +261,81 @@ export default function Dashboard() {
           </div>
         </section>
       )}
+
+      {/* Feedback insights + evaluation metrics */}
+      <div className="grid two" style={{ marginTop: 16 }}>
+        <section className="card fade-in">
+          <h2 className="section-title">Feedback insights</h2>
+          {!fb || fb.reviewed_cases === 0 ? (
+            <div className="empty-state" style={{ padding: 16 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                No reviews yet — confirm/reject cases to teach the prioritizer.
+              </span>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 10 }}>
+                <b style={{ fontSize: 18 }}>{fb.reviewed_cases}</b>
+                <span className="small">reviewed case(s)</span>
+                <span className="tag" style={{ marginLeft: 'auto' }}>
+                  {fb.stage_b_active ? 'ML ranker active' : `ML ranker at ${fb.stage_b_min_labels} reviews`}
+                </span>
+              </div>
+              {fb.by_issue && Object.keys(fb.by_issue).length > 0 && (
+                <div className="table-wrap">
+                  <table className="table">
+                    <thead>
+                      <tr><th>Issue type</th><th>Confirmed</th><th>Rejected</th></tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(fb.by_issue).map(([issue, counts]) => (
+                        <tr key={issue}>
+                          <td>{humanIssue(issue)}</td>
+                          <td>{counts.CONFIRM || 0}</td>
+                          <td>{counts.REJECT || 0}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="small" style={{ marginTop: 8, lineHeight: 1.6 }}>
+                Confirm/reject history shifts case ranking (capped, Bayesian-smoothed).
+                Each case shows its ranking explanation. Feedback never auto-closes cases.
+              </p>
+            </div>
+          )}
+        </section>
+
+        <section className="card fade-in">
+          <h2 className="section-title">Evaluation metrics</h2>
+          {!metrics || !metrics.available ? (
+            <div className="empty-state" style={{ padding: 16 }}>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {metrics?.reason || 'No evaluation labels available for the current dataset.'}
+              </span>
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr><th>Issue</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+                </thead>
+                <tbody>
+                  {metrics.metrics.map((m) => (
+                    <tr key={m.discrepancy_type}>
+                      <td>{humanIssue(m.discrepancy_type)}</td>
+                      <td>{m.precision.toFixed(2)}</td>
+                      <td>{m.recall.toFixed(2)}</td>
+                      <td><b>{m.f1.toFixed(2)}</b></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
 
       {/* Quick links */}
       <div className="grid three" style={{ marginTop: 16 }}>

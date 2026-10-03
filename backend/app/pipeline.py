@@ -357,6 +357,25 @@ def run_pipeline(data_dir: Path | None = None, db_path: Path | None = None,
                 sr.elapsed_s = round(time.perf_counter() - t, 3)
                 _finish_stage(sr)
 
+        if result.ok:
+            # ── Stage 10: Feedback-driven prioritization ─────────────
+            t, sr = stage("feedback_ranking")
+            try:
+                from .feedback_model import refresh_ranking_in_db, train_ranker
+                rank_meta = train_ranker(build_db, models_dir=config.MODELS_DIR)
+                info = refresh_ranking_in_db(build_db)
+                ml_note = " + stage-B ML ranker" if info.get("ml_active") else ""
+                adjusted = info.get("feedback_adjusted_cases", 0)
+                sr.detail = (f"Stage-A priors applied to {adjusted} case(s){ml_note}; "
+                             f"ranked by base score + capped feedback adjustment"
+                             + (f" (CV AUC {rank_meta['cv_metrics'].get('roc_auc')})" if rank_meta and rank_meta.get("cv_metrics", {}).get("roc_auc") else ""))
+            except Exception as exc:
+                sr.error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                sr.elapsed_s = round(time.perf_counter() - t, 3)
+                _finish_stage(sr)
+
         # ── Atomic swap ──────────────────────────────────────────────
         if result.ok and use_temp_db and tmp_db is not None:
             init_review_tables(build_db)
